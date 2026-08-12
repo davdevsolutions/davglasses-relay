@@ -22,6 +22,11 @@ async function db(table, method, value, query = '') {
 
 const server = http.createServer(async (req, res) => {
   if (req.url === '/health') return json(res, 200, { ok: true });
+  if (req.method === 'GET' && req.url?.startsWith('/v1/status')) {
+    const desktopId = new URL(req.url, 'http://relay.local').searchParams.get('desktopId');
+    const desktop = desktops.get(desktopId);
+    return json(res, 200, { online: Boolean(desktop && desktop.readyState === WebSocket.OPEN) });
+  }
   if (req.method !== 'POST' || !['/v1/pair', '/v1/chat'].includes(req.url)) return json(res, 404, { error: 'não encontrado' });
   if (limited(req.socket.remoteAddress)) return json(res, 429, { error: 'Muitas tentativas. Aguarde um minuto.' });
   try {
