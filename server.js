@@ -27,7 +27,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/v1/status')) {
     const desktopId = new URL(req.url, 'http://relay.local').searchParams.get('desktopId');
     const desktop = desktops.get(desktopId);
-    return json(res, 200, { online: Boolean(desktop && desktop.readyState === WebSocket.OPEN) });
+    return json(res, 200, { online: Boolean(desktop && desktop.readyState === WebSocket.OPEN), llm: desktop?.llm || null });
   }
   if (req.method !== 'POST' || !['/v1/pair', '/v1/chat', '/v1/unpair'].includes(req.url)) return json(res, 404, { error: 'não encontrado' });
   if (limited(req.socket.remoteAddress)) return json(res, 429, { error: 'Muitas tentativas. Aguarde um minuto.' });
@@ -51,6 +51,7 @@ wss.on('connection', (socket, request) => {
   socket.on('message', raw => {
     let event; try { event = JSON.parse(raw); } catch { return; }
     if (event.type === 'desktop.online' || event.type === 'pairing.code') {
+      if (event.type === 'desktop.online') socket.llm = event.llm || null;
       for (const [code, owner] of pairingCodes) if (owner === desktopId) pairingCodes.delete(code);
       if (event.pairing?.code && event.pairing.expiresAt > Date.now()) {
         pairingCodes.set(String(event.pairing.code), desktopId);
