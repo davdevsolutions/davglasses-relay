@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
+import { accountApi } from './account-api.js';
 
 const port = Number(process.env.PORT || 8080);
 const desktops = new Map();
@@ -21,6 +22,7 @@ async function db(table, method, value, query = '') {
 }
 
 const server = http.createServer(async (req, res) => {
+  if (await accountApi(req, res)) return;
   if (req.url === '/health') return json(res, 200, { ok: true });
   if (req.method === 'GET' && req.url?.startsWith('/v1/status')) {
     const desktopId = new URL(req.url, 'http://relay.local').searchParams.get('desktopId');
