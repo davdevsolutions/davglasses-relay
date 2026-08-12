@@ -37,7 +37,7 @@ const server = http.createServer(async (req, res) => {
     const requestId = crypto.randomUUID();
     const timeout = setTimeout(() => { pendingMobile.delete(requestId); if (!res.writableEnded) json(res, 504, { error: 'O Desktop não respondeu.' }); }, 10 * 60_000);
     pendingMobile.set(requestId, { res, events: [], timeout, stream: req.url === '/v1/chat' });
-    desktop.send(JSON.stringify(req.url === '/v1/pair' ? { type: 'pair.request', requestId, code: data.code, deviceName: data.deviceName } : { type: 'chat.ask', requestId, deviceId: data.deviceId, token: data.token, conversationId: data.conversationId, text: data.text }));
+    desktop.send(JSON.stringify(req.url === '/v1/pair' ? { type: 'pair.request', requestId, code: data.code, deviceName: data.deviceName } : { type: 'chat.ask', requestId, deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, conversationId: data.conversationId, text: data.text }));
     if (req.url === '/v1/chat') res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' });
   } catch { json(res, 400, { error: 'Requisição inválida.' }); }
 });
