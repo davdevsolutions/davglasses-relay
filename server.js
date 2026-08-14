@@ -11,6 +11,11 @@ const rate = new Map();
 const supabaseUrl = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const json = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
+const eventPaths = new Set(['/v1/device-status', '/v1/events/device-status']);
+const sendDesktopEvent = (desktop, event) => new Promise((resolve, reject) => {
+  if (!desktop || desktop.readyState !== WebSocket.OPEN) return reject(new Error('Desktop desconectado'));
+  desktop.send(JSON.stringify(event), error => error ? reject(error) : resolve());
+});
 const body = req => new Promise((resolve, reject) => { let value = ''; req.on('data', c => { value += c; if (value.length > 2_000_000) reject(new Error('grande demais')); }); req.on('end', () => resolve(JSON.parse(value || '{}'))); req.on('error', reject); });
 function limited(ip) { const now = Date.now(), values = (rate.get(ip) || []).filter(time => now - time < 60_000); values.push(now); rate.set(ip, values); return values.length > 30; }
 async function db(table, method, value, query = '') {
@@ -29,15 +34,15 @@ const server = http.createServer(async (req, res) => {
     const desktop = desktops.get(desktopId);
     return json(res, 200, { online: Boolean(desktop && desktop.readyState === WebSocket.OPEN), llm: desktop?.llm || null });
   }
-  if (req.method !== 'POST' || !['/v1/pair', '/v1/chat', '/v1/unpair', '/v1/device-status'].includes(req.url)) return json(res, 404, { error: 'não encontrado' });
+  if (req.method !== 'POST' || !['/v1/pair', '/v1/chat', '/v1/unpair', ...eventPaths].includes(req.url)) return json(res, 404, { error: 'não encontrado' });
   if (limited(req.socket.remoteAddress)) return json(res, 429, { error: 'Muitas tentativas. Aguarde um minuto.' });
   try {
     const data = await body(req);
     const desktopId = req.url === '/v1/pair' ? pairingCodes.get(String(data.code)) : data.desktopId;
     const desktop = desktops.get(desktopId);
     if (!desktop || desktop.readyState !== WebSocket.OPEN) return json(res, 503, { error: 'DavGlassesDesktop não está conectado.' });
-    if (req.url === '/v1/device-status') {
-      desktop.send(JSON.stringify({ type: 'device.status', deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, battery: data.battery || null }));
+    if (eventPaths.has(req.url)) {
+      await sendDesktopEvent(desktop, { type: 'device.status', deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, battery: data.battery || null });
       return json(res, 202, { ok: true });
     }
     const requestId = crypto.randomUUID();
@@ -52,6 +57,7 @@ wss.on('connection', (socket, request) => {
   const desktopId = request.headers['x-desktop-id']; if (!desktopId) return socket.close(1008, 'desktopId ausente');
   desktops.get(desktopId)?.close(); desktops.set(desktopId, socket);
   db('desktop_instances', 'POST', { desktop_id: desktopId, last_seen_at: new Date().toISOString() });
+  socket.on('error', error => console.error(`WebSocket Desktop ${desktopId}: ${error.message}`));
   socket.on('message', raw => {
     let event; try { event = JSON.parse(raw); } catch { return; }
     if (event.type === 'desktop.online' || event.type === 'pairing.code') {
