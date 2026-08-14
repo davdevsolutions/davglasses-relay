@@ -29,13 +29,17 @@ const server = http.createServer(async (req, res) => {
     const desktop = desktops.get(desktopId);
     return json(res, 200, { online: Boolean(desktop && desktop.readyState === WebSocket.OPEN), llm: desktop?.llm || null });
   }
-  if (req.method !== 'POST' || !['/v1/pair', '/v1/chat', '/v1/unpair'].includes(req.url)) return json(res, 404, { error: 'não encontrado' });
+  if (req.method !== 'POST' || !['/v1/pair', '/v1/chat', '/v1/unpair', '/v1/device-status'].includes(req.url)) return json(res, 404, { error: 'não encontrado' });
   if (limited(req.socket.remoteAddress)) return json(res, 429, { error: 'Muitas tentativas. Aguarde um minuto.' });
   try {
     const data = await body(req);
     const desktopId = req.url === '/v1/pair' ? pairingCodes.get(String(data.code)) : data.desktopId;
     const desktop = desktops.get(desktopId);
     if (!desktop || desktop.readyState !== WebSocket.OPEN) return json(res, 503, { error: 'DavGlassesDesktop não está conectado.' });
+    if (req.url === '/v1/device-status') {
+      desktop.send(JSON.stringify({ type: 'device.status', deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, battery: data.battery || null }));
+      return json(res, 202, { ok: true });
+    }
     const requestId = crypto.randomUUID();
     const timeout = setTimeout(() => { pendingMobile.delete(requestId); if (!res.writableEnded) json(res, 504, { error: 'O Desktop não respondeu.' }); }, 10 * 60_000);
     pendingMobile.set(requestId, { res, events: [], timeout, stream: req.url === '/v1/chat' });
