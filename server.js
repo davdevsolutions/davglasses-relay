@@ -36,7 +36,7 @@ const server = http.createServer(async (req, res) => {
   }
   const requestUrl = new URL(req.url, 'http://relay.local');
   const chatsRequest = requestUrl.pathname === '/v1/chats' && ['GET', 'POST'].includes(req.method);
-  if (!chatsRequest && (req.method !== 'POST' || !['/v1/pair', '/v1/chat', '/v1/unpair', ...eventPaths].includes(req.url))) return json(res, 404, { error: 'não encontrado' });
+  if (!chatsRequest && (req.method !== 'POST' || !['/v1/pair', '/v1/chat', '/v1/predict', '/v1/unpair', ...eventPaths].includes(requestUrl.pathname))) return json(res, 404, { error: 'não encontrado' });
   if (limited(req.socket.remoteAddress)) return json(res, 429, { error: 'Muitas tentativas. Aguarde um minuto.' });
   try {
     const data = req.method === 'GET' ? Object.fromEntries(requestUrl.searchParams) : await body(req);
@@ -47,10 +47,14 @@ const server = http.createServer(async (req, res) => {
       await sendDesktopEvent(desktop, { type: 'device.status', deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, battery: data.battery || null });
       return json(res, 202, { ok: true });
     }
+    if (requestUrl.pathname === '/v1/predict') {
+      await sendDesktopEvent(desktop, { type: 'chat.predict', deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, conversationId: data.conversationId, utteranceId: data.utteranceId, text: data.text });
+      return json(res, 202, { ok: true });
+    }
     const requestId = crypto.randomUUID();
     const timeout = setTimeout(() => { pendingMobile.delete(requestId); if (!res.writableEnded) json(res, 504, { error: 'O Desktop não respondeu.' }); }, 10 * 60_000);
     pendingMobile.set(requestId, { res, events: [], timeout, stream: req.url === '/v1/chat' });
-    const event = chatsRequest ? { type: 'chats.request', requestId, deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, action: data.action || 'list', conversationId: data.conversationId, name: data.name } : req.url === '/v1/pair' ? { type: 'pair.request', requestId, code: data.code, deviceName: data.deviceName } : req.url === '/v1/unpair' ? { type: 'unpair.request', requestId, deviceId: data.deviceId, token: data.token } : { type: 'chat.ask', requestId, deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, conversationId: data.conversationId, text: data.text };
+    const event = chatsRequest ? { type: 'chats.request', requestId, deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, action: data.action || 'list', conversationId: data.conversationId, name: data.name } : req.url === '/v1/pair' ? { type: 'pair.request', requestId, code: data.code, deviceName: data.deviceName } : req.url === '/v1/unpair' ? { type: 'unpair.request', requestId, deviceId: data.deviceId, token: data.token } : { type: 'chat.ask', requestId, deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, conversationId: data.conversationId, utteranceId: data.utteranceId, text: data.text };
     desktop.send(JSON.stringify(event));
     if (req.url === '/v1/chat') res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' });
   } catch { json(res, 400, { error: 'Requisição inválida.' }); }
