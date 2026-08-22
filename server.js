@@ -16,7 +16,7 @@ const sendDesktopEvent = (desktop, event) => new Promise((resolve, reject) => {
   if (!desktop || desktop.readyState !== WebSocket.OPEN) return reject(new Error('Desktop desconectado'));
   desktop.send(JSON.stringify(event), error => error ? reject(error) : resolve());
 });
-const body = req => new Promise((resolve, reject) => { let value = ''; req.on('data', c => { value += c; if (value.length > 2_000_000) reject(new Error('grande demais')); }); req.on('end', () => resolve(JSON.parse(value || '{}'))); req.on('error', reject); });
+const body = req => new Promise((resolve, reject) => { let value = ''; req.on('data', c => { value += c; if (value.length > 4_000_000) reject(new Error('grande demais')); }); req.on('end', () => resolve(JSON.parse(value || '{}'))); req.on('error', reject); });
 function limited(ip) { const now = Date.now(), values = (rate.get(ip) || []).filter(time => now - time < 60_000); values.push(now); rate.set(ip, values); return values.length > 30; }
 async function db(table, method, value, query = '') {
   if (!supabaseUrl || !supabaseKey) return;
@@ -54,13 +54,57 @@ const server = http.createServer(async (req, res) => {
     const requestId = crypto.randomUUID();
     const timeout = setTimeout(() => { pendingMobile.delete(requestId); if (!res.writableEnded) json(res, 504, { error: 'O Desktop não respondeu.' }); }, 10 * 60_000);
     pendingMobile.set(requestId, { res, events: [], timeout, stream: req.url === '/v1/chat' });
-    const event = chatsRequest ? { type: 'chats.request', requestId, deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, action: data.action || 'list', conversationId: data.conversationId, name: data.name } : req.url === '/v1/pair' ? { type: 'pair.request', requestId, code: data.code, deviceName: data.deviceName } : req.url === '/v1/unpair' ? { type: 'unpair.request', requestId, deviceId: data.deviceId, token: data.token } : { type: 'chat.ask', requestId, deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, conversationId: data.conversationId, utteranceId: data.utteranceId, text: data.text };
+    const event = chatsRequest ? { type: 'chats.request', requestId, deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, action: data.action || 'list', conversationId: data.conversationId, name: data.name } : req.url === '/v1/pair' ? { type: 'pair.request', requestId, code: data.code, deviceName: data.deviceName } : req.url === '/v1/unpair' ? { type: 'unpair.request', requestId, deviceId: data.deviceId, token: data.token } : { type: 'chat.ask', requestId, deviceId: data.deviceId, deviceName: data.deviceName, token: data.token, conversationId: data.conversationId, utteranceId: data.utteranceId, text: data.text, image: data.image };
     desktop.send(JSON.stringify(event));
     if (req.url === '/v1/chat') res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' });
   } catch { json(res, 400, { error: 'Requisição inválida.' }); }
 });
-const wss = new WebSocketServer({ server, path: '/v1/desktop' });
-wss.on('connection', (socket, request) => {
+const desktopWss = new WebSocketServer({ noServer: true });
+const mobileWss = new WebSocketServer({ noServer: true });
+server.on('upgrade', (request, socket, head) => {
+  const pathname = new URL(request.url, 'http://relay.local').pathname;
+  const target = pathname === '/v1/desktop' ? desktopWss : pathname === '/v1/mobile' ? mobileWss : null;
+  if (!target) return socket.destroy();
+  target.handleUpgrade(request, socket, head, ws => target.emit('connection', ws, request));
+});
+
+mobileWss.on('connection', socket => {
+  socket.on('error', error => console.error(`WebSocket Mobile: ${error.message}`));
+  socket.on('message', async raw => {
+    let event; try { event = JSON.parse(raw); } catch { return socket.send(JSON.stringify({ type: 'error', message: 'Mensagem inválida.' })); }
+    const desktop = desktops.get(event.desktopId);
+    if (!desktop || desktop.readyState !== WebSocket.OPEN) return socket.send(JSON.stringify({ type: 'error', requestId: event.requestId, message: 'DavGlassesDesktop não está conectado.' }));
+    if (event.type === 'chat.cancel') {
+      await sendDesktopEvent(desktop, { type: 'chat.cancel', requestId: event.requestId }).catch(() => {});
+      const pending = pendingMobile.get(event.requestId);
+      if (pending?.socket === socket) { clearTimeout(pending.timeout); pendingMobile.delete(event.requestId); }
+      return;
+    }
+    if (event.type === 'chat.predict') {
+      return sendDesktopEvent(desktop, event).catch(error => socket.send(JSON.stringify({ type: 'error', requestId: event.requestId, message: error.message })));
+    }
+    if (event.type !== 'chat.ask') return socket.send(JSON.stringify({ type: 'error', requestId: event.requestId, message: 'Evento não suportado.' }));
+    const requestId = String(event.requestId || crypto.randomUUID());
+    const timeout = setTimeout(() => {
+      pendingMobile.delete(requestId);
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'error', requestId, message: 'O Desktop não respondeu.' }));
+    }, 10 * 60_000);
+    pendingMobile.set(requestId, { socket, timeout, stream: true });
+    await sendDesktopEvent(desktop, { ...event, requestId }).catch(error => {
+      clearTimeout(timeout); pendingMobile.delete(requestId);
+      socket.send(JSON.stringify({ type: 'error', requestId, message: error.message }));
+    });
+  });
+  socket.on('close', () => {
+    for (const [requestId, pending] of pendingMobile) {
+      if (pending.socket !== socket) continue;
+      clearTimeout(pending.timeout); pendingMobile.delete(requestId);
+      for (const desktop of desktops.values()) sendDesktopEvent(desktop, { type: 'chat.cancel', requestId }).catch(() => {});
+    }
+  });
+});
+
+desktopWss.on('connection', (socket, request) => {
   const desktopId = request.headers['x-desktop-id']; if (!desktopId) return socket.close(1008, 'desktopId ausente');
   desktops.get(desktopId)?.close(); desktops.set(desktopId, socket);
   db('desktop_instances', 'POST', { desktop_id: desktopId, last_seen_at: new Date().toISOString() });
@@ -82,7 +126,10 @@ wss.on('connection', (socket, request) => {
       db('paired_devices', 'POST', { device_id: event.credentials.deviceId, desktop_id: desktopId, token_hash: tokenHash, device_name: event.credentials.deviceName || null, last_seen_at: new Date().toISOString() });
       db('relay_events', 'POST', { desktop_id: desktopId, device_id: event.credentials.deviceId, event_type: 'paired' });
     }
-    if (pending.stream) {
+    if (pending.socket) {
+      if (pending.socket.readyState === WebSocket.OPEN) pending.socket.send(JSON.stringify(event));
+      if (!['chat.done', 'error'].includes(event.type)) return;
+    } else if (pending.stream) {
       pending.res.write(`data: ${JSON.stringify(event)}\n\n`);
       if (!['chat.done', 'error'].includes(event.type)) return;
       pending.res.end();
