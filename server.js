@@ -7,6 +7,7 @@ const port = Number(process.env.PORT || 8080);
 const desktops = new Map();
 const pairingCodes = new Map();
 const pendingMobile = new Map();
+const rtcPeers = new Map();
 const rate = new Map();
 const supabaseUrl = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -80,6 +81,12 @@ mobileWss.on('connection', socket => {
       if (pending?.socket === socket) { clearTimeout(pending.timeout); pendingMobile.delete(event.requestId); }
       return;
     }
+    if (event.type === 'rtc.signal') {
+      const sessionId = String(event.sessionId || '');
+      if (!sessionId) return socket.send(JSON.stringify({ type: 'rtc.error', message: 'sessionId ausente.' }));
+      rtcPeers.set(sessionId, socket);
+      return sendDesktopEvent(desktop, event).catch(error => socket.send(JSON.stringify({ type: 'rtc.error', sessionId, message: error.message })));
+    }
     if (event.type === 'chat.predict') {
       return sendDesktopEvent(desktop, event).catch(error => socket.send(JSON.stringify({ type: 'error', requestId: event.requestId, message: error.message })));
     }
@@ -96,6 +103,7 @@ mobileWss.on('connection', socket => {
     });
   });
   socket.on('close', () => {
+    for (const [sessionId, peer] of rtcPeers) if (peer === socket) rtcPeers.delete(sessionId);
     for (const [requestId, pending] of pendingMobile) {
       if (pending.socket !== socket) continue;
       clearTimeout(pending.timeout); pendingMobile.delete(requestId);
@@ -118,6 +126,11 @@ desktopWss.on('connection', (socket, request) => {
         pairingCodes.set(String(event.pairing.code), desktopId);
         setTimeout(() => { if (pairingCodes.get(String(event.pairing.code)) === desktopId) pairingCodes.delete(String(event.pairing.code)); }, Math.max(0, event.pairing.expiresAt - Date.now())).unref?.();
       }
+      return;
+    }
+    if (event.type === 'rtc.signal') {
+      const peer = rtcPeers.get(String(event.sessionId || ''));
+      if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify(event));
       return;
     }
     const pending = pendingMobile.get(event.requestId); if (!pending) return;
